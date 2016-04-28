@@ -1,14 +1,13 @@
-immutable IndexRange
-    first::Tuple
-    last::Tuple
+immutable Period{T<:Tuple}
+    first::T
+    last::T
 end
-first(ir::IndexRange) = ir.first
-last(ir::IndexRange) = ir.last
-function ranges(r::IndexRange)
-    r1 = first(r)
-    r2 = last(r)
-    [r1[idx]:r2[idx] for idx in 1:length(r1)]
-end
+
+Base.in{T}(x::T, p::Period{T}) = (p.first <= x <= p.last)
+append{T}(p::Period, f::T, l::T) = Period((p.first..., f), (p.last..., l))
+append(p::Period, r::Range) = append(p, first(r), last(r))
+append(p::Period, s) = append(p, s, s)
+
 
 immutable TArray
     data::NDSparse
@@ -17,6 +16,25 @@ immutable TArray
     keynames::Tuple
     valnames::Tuple
 end
+
+Base.show(io::IO, ta::TArray) = show_data(io, ta, ta.data)
+function show_data{T,D<:Tuple}(io::IO, ta::TArray, t::NDSparse{T,D})
+    flush!(t)
+    print("TArray $(nrows(ta))x$(ncols(ta)) ")
+    println(io, D, " => ", T)
+    print(" $(ta.keynames) => $(ta.valnames)")
+    n = length(t.indexes)
+    for i in 1:min(n,10)
+        println(); print(io, " $(NDSparseData.row(t.indexes, i)) => $(t.data[i])")
+    end
+    if n > 20
+        println(); print(" ⋮")
+        for i in (n-9):n
+            println(); print(io, " $(NDSparseData.row(t.indexes, i)) => $(t.data[i])")
+        end
+    end
+end
+
 
 nrows(ta::TArray) = length(ta.data.indexes)
 ncols(ta::TArray) = length(ta.keynames) + length(ta.valnames)
@@ -73,63 +91,68 @@ function searchsortedfirst(ta::TArray, idx::Tuple)
     end
 end
 
-# indexing
-getindex(ta::TArray, idx::Tuple) = ta.data[idx...]
-getindex(ta::TArray, idx::Tuple, ::Colon) = tuple(idx..., ta.data[idx]...)
-setindex!(ta::TArray, rhs, idx::Tuple) = (ta.data[idx...] = rhs)
-
-getindex(ta::TArray, i::Integer) = (flush!(ta); values(ta)[i])
-getindex(ta::TArray, i::Integer, ::Colon) = tuple(ta.data.indexes[i]..., ta.data.data[i]...)
-setindex!(ta::TArray, rhs, i::Integer) = (ta[keys(ta)[i]] = rhs)
-
-getindex(ta::TArray, r::Range) = (flush!(ta); ta.data[r])
-getindex(ta::TArray, r::IndexRange) = (flush!(ta); ta.data[_span(ta, r)])
-
-function getindex(ta::TArray, ::Colon, c::Integer)
-    l = length(ta.keynames)
-    (c > l) ? ta.data.data.columns[c-l] : ta.data.indexes.columns[c]
-end
-function getindex(ta::TArray, ::Colon, c)
-    p = findfirst(ta.keynames, c)
-    if p > 0
-        ta.data.indexes.columns[p]
-    else
-        p = findfirst(ta.valnames, c)
-        ta.data.data.columns[p]
-    end
-end
-
-function _span(ta::TArray, r::IndexRange)
-    r1 = first(r)
-    r2 = last(r)
+# select / indexing
+function _span{T}(ta::TArray, r::Period{T})
+    r1 = r.first
+    r2 = r.last
     idx = ta.data.indexes
     lidx = length(idx)
 
     i1 = searchsortedfirst(idx, r1)
     i2 = searchsortedfirst(idx, r2)
-    ((i2 <= lidx) && (idx[i2] >= r2)) || (i2 -= 1)
+    ((i2 > lidx) || (idx[i2] > r2)) && (i2 -= 1)
     i1:i2
 end
+function _span{T<:Tuple}(ta::TArray, r::T)
+    idx = ta.data.indexes
+    lidx = length(idx)
+    i2 = i1 = searchsortedfirst(idx, r)
+    ((i2 > lidx) || (idx[i2] > r2)) && (i2 -= 1)
+    i1:i2
+end
+_span(ta::TArray, r::Vector{Period}) = union([_span(ta, c) for c in r]...)
+
+function getindex(ta::TArray, conditions...)
+    flush!(ta)
+    NI = length(ta.keynames)
+    if length(conditions) != NI
+        throw(DimensionMismatch("Cannot match $(length(conditions)) to $NI dimension data"))
+    end
+
+    periods = Period[Period((),())]
+    nranges = 0
+    for cond in conditions
+        if isa(cond, Vector)
+            pp = copy(periods)
+            periods = Period[]
+            for p in pp
+                for c in cond 
+                    push!(periods, append(p, c))
+                end
+            end
+        else
+            if isa(cond, Range)
+                nranges += 1
+                if nranges > 1
+                    throw(ArgumentError("Can not index with multiple ranges"))
+                end
+            end
+            periods = Period[append(period, cond) for period in periods]
+        end
+    end
+    spn = _span(ta, periods)
+
+    data = ta.data
+    idxs = data.indexes[spn]
+    vals = data.data[spn]
+
+    TArray(ta.keynames, [Pair(v...) for v in zip(ta.keynames, idxs)]..., [Pair(v...) for v in zip(ta.valnames, vals)]...)
+end
+setindex!(ta::TArray, rhs, idx::Tuple) = (ta.data[idx...] = rhs)
 
 # groupby
 groupby(ta::TArray, keynames) = index(ta, keynames)
 groupby!(ta::TArray, keynames) = index!(ta, keynames)
-
-# select
-function select(ta::TArray, r::IndexRange)
-    flush!(ta)
-    r1 = first(r)
-    r2 = last(r)
-
-    data = ta.data
-    i1 = searchsortedfirst(data.indexes, r1)
-    i2 = searchsortedlast(data.indexes, r2)
-
-    idxs = data.indexes[i1:i2]
-    vals = data.data[i1:i2]
-
-    TArray(ta.keynames, [Pair(v...) for v in zip(ta.keynames, idxs)]..., [Pair(v...) for v in zip(ta.valnames, vals)]...)
-end
 
 # project
 # duplicates are eliminated as per keyname
@@ -218,7 +241,7 @@ function thetajoin(ta1::TArray, ta2::TArray, cond::Function, relnames=())
             end
         end
     end
-    result
+    TArray(result, result_indexnames, result_valnames)
 end
 
 # shift joins
@@ -226,23 +249,17 @@ end
 # shift
 
 # windowing
-# fixed width windows
-immutable IdxWindow
-    first::Int      # start of first window
-    step::Int       # increment window start
-    width::Int      # window width
-end
-
-# key range windows
-immutable KeyWindow{K<:Tuple, S<:Tuple, W<:Tuple}
+immutable Window{K,S,W}
     first::K        # start of first window
     step::S         # increment window start
     width::W        # window width
 end
+typealias IdxWindow Window{Int,Int,Int}
+typealias KeyWindow Window{Tuple,Tuple,Tuple}
 
 window(tain::TArray, w, f) = window!(TArray(similar(tain.data), tain.keynames, tain.valnames), tain, w, f)
 
-function window!{K,S,W}(taout::TArray, tain::TArray, w::KeyWindow{K,S,W}, f)
+function window!(taout::TArray, tain::TArray, w::KeyWindow, f)
     i1 = w.first
     idxs = tain.data.indexes
     vals = tain.data.data
@@ -267,7 +284,7 @@ function window!{K,S,W}(taout::TArray, tain::TArray, w::KeyWindow{K,S,W}, f)
     ws = [w.step...]
     while i1 <= iend
         i2 = tuple(([i1...] .+ ww)...)
-        sr = _span(tain, IndexRange(i1, i2))
+        sr = _span(tain, Period(i1, i2))
         cols = f(idxs[sr]..., vals[sr]...)
         push!(oidxs, tuple(cols[1:nidxs]...))
         push!(ovals, tuple(cols[(nidxs+1):end]...))
@@ -276,7 +293,7 @@ function window!{K,S,W}(taout::TArray, tain::TArray, w::KeyWindow{K,S,W}, f)
     taout
 end
 
-function window!{K,S,W}(ta::TArray, w::KeyWindow{K,S,W}, f)
+function window!(ta::TArray, w::KeyWindow, f)
     i1 = w.first
     idxs = ta.data.indexes
     vals = ta.data.data
@@ -288,7 +305,7 @@ function window!{K,S,W}(ta::TArray, w::KeyWindow{K,S,W}, f)
     ws = [w.step...]
     while i1 <= iend
         i2 = tuple(([i1...] .+ ww)...)
-        sr = _span(tain, IndexRange(i1, i2))
+        sr = _span(tain, Period(i1, i2))
         cols = f(idxs[sr]..., vals[sr]...)
         idxs[outidx] = tuple(cols[1:nidxs]...)
         vals[outidx] = tuple(cols[(nidxs+1):end]...)
