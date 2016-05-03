@@ -9,7 +9,8 @@ import NDSparseData: flush!
 export TArray, window, nrows, ncols, index, index!, Period,
         groupby, groupby!, select, project, project!, union, intersect, thetajoin,
         rename, rename!, difference,
-        IdxWindow, KeyWindow, window, window!
+        IdxWindow, KeyWindow, window, window!,
+        getvals, setvals
 
 include("utils.jl")
 include("ts.jl")

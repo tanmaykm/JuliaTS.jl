@@ -9,35 +9,13 @@ append(p::Period, r::Range) = append(p, first(r), last(r))
 append(p::Period, s) = append(p, s, s)
 
 
-immutable TArray
-    data::NDSparse
+immutable TArray{T, D<:Tuple, C<:Tuple, V<:AbstractVector}
+    data::NDSparse{T,D,C,V}
     raw_data::Dict
 
     keynames::Tuple
     valnames::Tuple
 end
-
-Base.show(io::IO, ta::TArray) = show_data(io, ta, ta.data)
-function show_data{T,D<:Tuple}(io::IO, ta::TArray, t::NDSparse{T,D})
-    flush!(t)
-    print("TArray $(nrows(ta))x$(ncols(ta)) ")
-    println(io, D, " => ", T)
-    print(" $(ta.keynames) => $(ta.valnames)")
-    n = length(t.indexes)
-    for i in 1:min(n,10)
-        println(); print(io, " $(NDSparseData.row(t.indexes, i)) => $(t.data[i])")
-    end
-    if n > 20
-        println(); print(" ⋮")
-        for i in (n-9):n
-            println(); print(io, " $(NDSparseData.row(t.indexes, i)) => $(t.data[i])")
-        end
-    end
-end
-
-
-nrows(ta::TArray) = length(ta.data.indexes)
-ncols(ta::TArray) = length(ta.keynames) + length(ta.valnames)
 
 # construct a TArray giving column-name=>column-data pairs
 function TArray(colpairs::Pair...)
@@ -62,7 +40,29 @@ function TArray(data::NDSparse, keynames::Tuple, valnames::Tuple)
     TArray(data, raw_data, keynames, valnames)
 end
 
+# TODO: optimize to avoid indexing again
 TArray(from::TArray, colpairs::Pair...) = TArray(from.keynames, from.raw_data..., colpairs...)
+
+Base.show(io::IO, ta::TArray) = show_data(io, ta, ta.data)
+function show_data{T,D<:Tuple}(io::IO, ta::TArray, t::NDSparse{T,D})
+    flush!(t)
+    print("TArray $(nrows(ta))x$(ncols(ta)) ")
+    println(io, D, " => ", T)
+    print(" $(ta.keynames) => $(ta.valnames)")
+    n = length(t.indexes)
+    for i in 1:min(n,10)
+        println(io); print(io, " $(NDSparseData.row(t.indexes, i)) => $(t.data[i])")
+    end
+    if n > 20
+        println(io); print(io, " ⋮")
+        for i in (n-9):n
+            println(io); print(io, " $(NDSparseData.row(t.indexes, i)) => $(t.data[i])")
+        end
+    end
+end
+
+nrows(ta::TArray) = length(ta.data.indexes)
+ncols(ta::TArray) = length(ta.keynames) + length(ta.valnames)
 
 deepcopy(ta::TArray) = TArray(ta.keynames, [x.first=>copy(x.second) for x in ta.raw_data]...)
 
@@ -149,6 +149,21 @@ function getindex(ta::TArray, conditions...)
     TArray(ta.keynames, [Pair(v...) for v in zip(ta.keynames, idxs)]..., [Pair(v...) for v in zip(ta.valnames, vals)]...)
 end
 setindex!(ta::TArray, rhs, idx::Tuple) = (ta.data[idx...] = rhs)
+
+# set/get single value column vectors
+function getvals(ta::TArray, colname)
+    idx = findfirst(ta.valnames, colname)
+    ta.data.data.columns[idx]
+end
+function setvals(ta::TArray, colname, vals::Vector)
+    idx = findfirst(ta.valnames, colname)
+    if idx > 0
+        ta.data.data.columns[idx] = vals
+        return ta
+    else
+        return TArray(ta, colname=>vals)
+    end
+end
 
 # groupby
 groupby(ta::TArray, keynames) = index(ta, keynames)
