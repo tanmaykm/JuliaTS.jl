@@ -66,7 +66,7 @@ ncols(ta::TArray) = length(ta.keynames) + length(ta.valnames)
 
 deepcopy(ta::TArray) = TArray(ta.keynames, [x.first=>copy(x.second) for x in ta.raw_data]...)
 
-index!(ta::TArray, keynames) = TArray((keynames...,), ta.raw_data...)
+index!(ta::TArray, keynames) = ((keynames...,) == ta.keynames) ? ta : TArray((keynames...,), ta.raw_data...)
 index(ta::TArray, keynames) = index!(deepcopy(ta), keynames)
 
 eltype(ta::TArray) = eltype(ta.data)
@@ -166,8 +166,31 @@ function setvals(ta::TArray, colname, vals::Vector)
 end
 
 # groupby
-groupby(ta::TArray, keynames) = index(ta, keynames)
-groupby!(ta::TArray, keynames) = index!(ta, keynames)
+_aggregate(fn::Function, cols::Tuple) = ([fn(col) for col in cols]...)
+_aggregate(fns::Tuple, cols::Tuple) = ([fns[i](cols[i]) for i in 1:length(cols)]...)
+function _aggregate!(ta::TArray, fn)
+    I, D  = ta.data.indexes, ta.data.data
+    maxi = nrows(ta)
+    nvals = length(ta.valnames)
+    i = 1
+    a = 0
+    while i < maxi
+        j = searchsortedlast(I, I[i], i, maxi, Base.Order.ForwardOrdering())
+        a += 1
+        D[a] = _aggregate(fn, D[i:j])
+        i = j + 1
+    end
+    for c in I.columns
+        resize!(c, a)
+    end
+    for c in D.columns
+        resize!(c, a)
+    end
+    ta
+end
+
+groupby(ta::TArray, keynames, fn) = _aggregate!(index(ta, keynames), fn)
+groupby!(ta::TArray, keynames, fn) = _aggregate!(index!(ta, keynames), fn)
 
 # project
 # duplicates are eliminated as per keyname
