@@ -14,7 +14,14 @@ end
 similar(I::Indexes, d::Integer) = Indexes(map((c)->similar(c,d), I.columns)...)
 push!(I::Indexes, r) = NDSparseData.pushrow!(I, r)
 sizehint!(I::Indexes, i) = (map((c)->sizehint!(c,i), I.columns); I)
-setrow!(I::Indexes, rhs, i::Integer) = tuple([I.columns[j][i]=rhs[j] for j in 1:length(I.columns)]...)
+function setrow!(I::Indexes, rhs, i::Integer)
+    cols = I.columns
+    L = length(cols)
+    for j in 1:L
+        cols[j][i] = rhs[j]
+    end
+    rhs
+end
 setindex!(I::Indexes, rhs, i::Integer) = setrow!(I, rhs, i)
 copy!(i1::Indexes, i2::Indexes) = (map((idx)->copy!(i1.columns[idx], i2.columns[idx]), 1:ndims(i1)); i1)
 resize!(I::Indexes, d::Integer) = (map((c)->resize!(c,d), I.columns); I)

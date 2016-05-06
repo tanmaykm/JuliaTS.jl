@@ -3,7 +3,7 @@ immutable Period{T<:Tuple}
     last::T
 end
 
-Base.in{T}(x::T, p::Period{T}) = (p.first <= x <= p.last)
+in{T}(x::T, p::Period{T}) = (p.first <= x <= p.last)
 append{T}(p::Period, f::T, l::T) = Period((p.first..., f), (p.last..., l))
 append(p::Period, r::Range) = append(p, first(r), last(r))
 append(p::Period, s) = append(p, s, s)
@@ -43,7 +43,7 @@ end
 # TODO: optimize to avoid indexing again
 TArray(from::TArray, colpairs::Pair...) = TArray(from.keynames, from.raw_data..., colpairs...)
 
-Base.show(io::IO, ta::TArray) = show_data(io, ta, ta.data)
+show(io::IO, ta::TArray) = show_data(io, ta, ta.data)
 function show_data{T,D<:Tuple}(io::IO, ta::TArray, t::NDSparse{T,D})
     flush!(t)
     print("TArray $(nrows(ta))x$(ncols(ta)) ")
@@ -151,10 +151,14 @@ end
 setindex!(ta::TArray, rhs, idx::Tuple) = (ta.data[idx...] = rhs)
 
 # set/get single value column vectors
+# get can fetch any column, but set can be called only on value columns
+#=
 function getvals(ta::TArray, colname)
     idx = findfirst(ta.valnames, colname)
     ta.data.data.columns[idx]
 end
+=#
+getvals(ta::TArray, colname) = ta.raw_data[colname]
 function setvals(ta::TArray, colname, vals::Vector)
     idx = findfirst(ta.valnames, colname)
     if idx > 0
@@ -166,8 +170,8 @@ function setvals(ta::TArray, colname, vals::Vector)
 end
 
 # groupby
-_aggregate(fn::Function, cols::Tuple) = ([fn(col) for col in cols]...)
-_aggregate(fns::Tuple, cols::Tuple) = ([fns[i](cols[i]) for i in 1:length(cols)]...)
+_aggregate(cols::Tuple, fn::Function) = ([fn(col) for col in cols]...)
+_aggregate(cols::Tuple, fns::Tuple) = ([fns[i](cols[i]) for i in 1:length(cols)]...)
 function _aggregate!(ta::TArray, fn)
     I, D  = ta.data.indexes, ta.data.data
     maxi = nrows(ta)
@@ -177,7 +181,7 @@ function _aggregate!(ta::TArray, fn)
     while i < maxi
         j = searchsortedlast(I, I[i], i, maxi, Base.Order.ForwardOrdering())
         a += 1
-        D[a] = _aggregate(fn, D[i:j])
+        D[a] = _aggregate(D[i:j], fn)
         i = j + 1
     end
     for c in I.columns
@@ -248,7 +252,41 @@ rename(ta::TArray, pfx) = rename(ta, _namepfx(ta.keynames, pfx), _namepfx(ta.val
 rename!(ta::TArray, pfx) = rename!(ta, _namepfx(ta.keynames, pfx), _namepfx(ta.valnames, pfx))
 
 # cross products
+
+# natural join
+function naturaljoin(taout, ta1, ta2, jointype, fn)
+    # only inner join supported as of now
+    (jointype == :inner) || throw(ArgumentError("Unsupported join type $jointype"))
+
+    I1 = ta1.data.indexes
+    I2 = ta2.data.indexes
+    D1 = ta1.data.data
+    D2 = ta2.data.data
+    
+    I = intersect(I1, I2)
+    N = length(I)
+    resize!(taout.data.indexes, N)
+    resize!(taout.data.data, N)
+    I_ = taout.data.indexes
+    D = taout.data.data
+
+    i1 = i2 = i = 1
+    
+    for i in 1:N
+        ival = I_[i] = I[i]
+        while !NDSparseData.isequal_tup(I1[i1], ival)
+            i1 += 1
+        end
+        while !NDSparseData.isequal_tup(I2[i2], ival)
+            i2 += 1
+        end
+        D[i] = fn(D1[i1], D2[i2])
+    end
+    taout
+end
+
 # theta join
+#= not very useful
 function thetajoin(ta1::TArray, ta2::TArray, cond::Function, relnames=())
     if isempty(relnames)
         flush!(ta1, ta2)
@@ -281,138 +319,114 @@ function thetajoin(ta1::TArray, ta2::TArray, cond::Function, relnames=())
     end
     TArray(result, result_indexnames, result_valnames)
 end
+=#
 
 # shift joins
 # shiftall
 # shift
+function timeshift!{T<:Union{Date,DateTime},D<:DatePeriod}(col::Vector{T}, by::D)
+    for idx in 1:length(col)
+        col[idx] += by
+    end
+    col
+end
+
+timeshift(ta::TArray, col, by) = timeshift!(deepcopy(ta), col, by)
+function timeshift!(ta::TArray, col, by)
+    timeshift!(ta.raw_data[col], by)
+    ta
+end
 
 # windowing
 immutable Window{K,S,W}
     first::K        # start of first window
+    last::K         # end of the last window
     step::S         # increment window start
     width::W        # window width
 end
-typealias IdxWindow Window{Int,Int,Int}
-typealias KeyWindow Window{Tuple,Tuple,Tuple}
 
-window(tain::TArray, w, f) = window!(TArray(similar(tain.data), tain.keynames, tain.valnames), tain, w, f)
+Window{K,S}(first::K, last::K, step::S) = Window{K,S,S}(first, last, step, step)
 
-function window!(taout::TArray, tain::TArray, w::KeyWindow, f)
-    i1 = w.first
-    idxs = tain.data.indexes
-    vals = tain.data.data
-    iend = idxs[end]
-
-    tdout = taout.data
-    oidxs = tdout.indexes
-    ovals = tdout.data
-    nidxs = length(oidxs.columns)
-
-    guess = nrows(tain)
-    for c in oidxs.columns
-        resize!(c, 0)
-        sizehint!(c, guess)
+start{K}(w::Window{K}) = w.first
+done{K}(w::Window{K}, state::K) = (NDSparseData.cmp_tup(state, w.last) > -1)
+#=
+@generated function next{K,S,W,N}(w::Window{K,S,W}, state::NTuple{N})
+    quote
+        _newstate = [state...]
+        for n in N:-1:1
+            if _newstate[n] < w.last[n]
+                nextn = min(_newstate[n] + w.step[n], w.last[n])
+                if nextn > _newstate[n]
+                    _newstate[n] = nextn
+                    break
+                end
+            else
+                if n == 1
+                    _newstate = [w.last...]
+                else
+                    _newstate[n] = w.first[n]
+                end
+            end
+        end
+        newstate = tuple(_newstate...)::K
+        newend = tuple([min(state[i] + w.width[i], w.last[i]) for i in 1:N]...)::K
+        return Period(state, newend), newstate
     end
-    for c in ovals.columns
-        resize!(c, 0)
-        sizehint!(c, guess)
-    end
+end
 
-    ww = [w.width...]
-    ws = [w.step...]
-    while i1 <= iend
-        i2 = tuple(([i1...] .+ ww)...)
-        sr = _span(tain, Period(i1, i2))
-        cols = f(idxs[sr]..., vals[sr]...)
-        push!(oidxs, tuple(cols[1:nidxs]...))
-        push!(ovals, tuple(cols[(nidxs+1):end]...))
-        i1 = tuple(([i1...] .+ ws)...)
+
+function _nextstate{T,S}(state::T, step::S, last::T)
+    stepped = (state+step)::T
+    nextstate = min(stepped, last)
+    nextstate, (nextstate > state)
+end
+
+@generated function _nextstate{T<:Tuple,S<:Tuple}(state::T, step::S, last::T, n::Int)
+    statetypes = T.parameters
+    steptypes = S.parameters
+    quote
+        nextstate = ()
+        
+    end
+end
+=#
+
+function next{K,S,W}(w::Window{K,S,W}, state::K)
+    N = length(state)
+    _newstate = [state...]
+    for n in N:-1:1
+        if _newstate[n] < w.last[n]
+            nextn = min(_newstate[n] + w.step[n], w.last[n])
+            if nextn > _newstate[n]
+                _newstate[n] = nextn
+                break
+            end
+        else
+            if n == 1
+                _newstate = [w.last...]
+            else
+                _newstate[n] = w.first[n]
+            end
+        end
+    end
+    newstate = tuple(_newstate...)::K
+    newend = tuple([min(state[i] + w.width[i], w.last[i]) for i in 1:N]...)::K
+    Period(state, newend), newstate
+end
+
+
+# window type decides the output key values; can be :first, :last 
+# TODO: more window types
+function window(taout::TArray, ta::TArray, wspec::Window, wintype, fn)
+    I = taout.data.indexes
+    D = taout.data.data
+    Din = ta.data.data
+    state = start(wspec)
+    while !done(wspec, state)
+        w, state = next(wspec, state)
+        push!(I, getfield(w, wintype)) # NOTE: getfield may not work for other window types
+        sr = _span(ta, w)
+        push!(D, _aggregate(Din[sr], fn))
     end
     taout
-end
-
-function window!(ta::TArray, w::KeyWindow, f)
-    i1 = w.first
-    idxs = ta.data.indexes
-    vals = ta.data.data
-    iend = idxs[end]
-    outidx = 1
-    nidxs = length(ta.keynames)
-
-    ww = [w.width...]
-    ws = [w.step...]
-    while i1 <= iend
-        i2 = tuple(([i1...] .+ ww)...)
-        sr = _span(tain, Period(i1, i2))
-        cols = f(idxs[sr]..., vals[sr]...)
-        idxs[outidx] = tuple(cols[1:nidxs]...)
-        vals[outidx] = tuple(cols[(nidxs+1):end]...)
-        i1 = tuple(([i1...] .+ ws)...)
-        outidx += 1
-    end
-    outidx -= 1
-    for c in idxs.columns
-        resize!(c, outidx)
-    end
-    for c in vals.columns
-        resize!(c, outidx)
-    end
-    ta
-end
-
-function window!(taout::TArray, tain::TArray, w::IdxWindow, f)
-    i1 = w.first
-    iend = nrows(tain)
-    idxs = tain.data.indexes
-    vals = tain.data.data
-
-    tdout = taout.data
-    oidxs = tdout.indexes
-    ovals = tdout.data
-    nidxs = length(oidxs.columns)
-
-    guess = div(nrows(tain), w.step)+1
-    for c in oidxs.columns
-        resize!(c, 0)
-        sizehint!(c, guess)
-    end
-    for c in ovals.columns
-        resize!(c, 0)
-        sizehint!(c, guess)
-    end
-
-    while i1 <= iend
-        i2 = min((i1 + w.width), iend)
-        cols = f(idxs[i1:i2]..., vals[i1:i2]...)
-        push!(oidxs, tuple(cols[1:nidxs]...))
-        push!(ovals, tuple(cols[(nidxs+1):end]...))
-        i1 += w.step
-    end
-    taout
-end
-
-function window!(ta::TArray, w::IdxWindow, f)
-    i1 = w.first
-    iend = nrows(ta)
-    idxs = ta.data.indexes
-    vals = ta.data.data
-    outidx = 1
-    nidxs = length(ta.keynames)
-
-    while i1 <= iend
-        i2 = min((i1 + w.width), iend)
-        cols = f(idxs[i1:i2]..., vals[i1:i2]...)
-        idxs[outidx] = tuple(cols[1:nidxs]...)
-        vals[outidx] = tuple(cols[(nidxs+1):end]...)
-        i1 += w.step
-        outidx += 1
-    end
-    outidx -= 1
-    for c in idxs.columns
-        resize!(c, outidx)
-    end
-    for c in vals.columns
-        resize!(c, outidx)
-    end
-    ta
 end
