@@ -26,7 +26,9 @@ end
 
 function TArray(keynames::Tuple, colpairs::Pair...)
     raw_data = Dict(colpairs...)
-    valnames = tuple(setdiff([c.first for c in colpairs], keynames)...)
+    colnames = [c.first for c in colpairs]
+    notkey = [!(c in keynames) for c in colnames]
+    valnames = tuple(colnames[notkey]...)
     valcols = [raw_data[c] for c in valnames]
     keycols = [raw_data[c] for c in keynames]
 

@@ -11,6 +11,9 @@ TArray(colpairs::Pair...)
 TArray(keynames::Tuple, colpairs::Pair...)
 TArray(data::NDSparse, keynames::Tuple, valnames::Tuple)
 TArray(from::TArray, colpairs::Pair...)
+TArray(from::TimeSeries.TimeArray)
+TArray(keynames::Tuple, from::TimeSeries.TimeArray)
+TArray(keynames::Tuple, from::DataFrames.DataFrame)
 ````
 
 #### get/set

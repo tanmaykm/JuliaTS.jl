@@ -2,6 +2,7 @@ module JuliaTS
 
 using NDSparseData
 using Base.Dates
+using Requires
 
 import Base: zero, getindex, setindex!, eltype, keys, values, push!, similar, sizehint!, first, last, searchsortedfirst, resize!, copy!,
              select, union, intersect, deepcopy, start, next, done, show, in
@@ -16,5 +17,6 @@ export TArray, window, nrows, ncols, index, index!, Period,
 
 include("utils.jl")
 include("ts.jl")
+include("io.jl")
 
 end # module
